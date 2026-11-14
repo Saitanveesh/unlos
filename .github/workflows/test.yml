@@ -16,3 +16,16 @@ jobs:
       - run: node --check server.js
       - run: node --check public/app.js
       - run: npm test
+      - name: Build and exercise Docker image
+        if: matrix.node == '24'
+        run: |
+          docker build -t unlos-ci .
+          docker run -d --name unlos-ci -p 127.0.0.1:3101:3000 unlos-ci
+          for attempt in $(seq 1 20); do
+            if curl -fsS http://127.0.0.1:3101/api/health; then break; fi
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:3101/
+          docker logs unlos-ci
+          docker stop unlos-ci
+          docker rm unlos-ci
