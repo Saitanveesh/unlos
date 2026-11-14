@@ -1,0 +1,13 @@
+{
+  "name": "unlos-learning-platform",
+  "version": "1.0.0",
+  "private": true,
+  "description": "UNLOS course library, lessons, quizzes and learner dashboard",
+  "type": "commonjs",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "test": "node --test tests/*.test.js"
+  }
+}

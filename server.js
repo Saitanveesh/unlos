@@ -1,0 +1,262 @@
+'use strict';
+
+const http = require('node:http');
+const fs = require('node:fs');
+const path = require('node:path');
+const crypto = require('node:crypto');
+const { URL } = require('node:url');
+const { courses: seedCourses } = require('./lib/courses');
+
+const PUBLIC_DIR = path.join(__dirname, 'public');
+const MIME = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'application/javascript; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon' };
+const ttl = 30 * 24 * 60 * 60 * 1000;
+const id = () => crypto.randomUUID();
+const sha = value => crypto.createHash('sha256').update(value).digest('hex');
+const safeText = (value, max) => typeof value === 'string' ? value.trim().slice(0, max) : '';
+const slugify = value => value.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 65);
+const cleanEmail = value => safeText(value, 254).toLowerCase();
+
+function hashPassword(password, salt = crypto.randomBytes(16).toString('hex')) {
+  return `${salt}:${crypto.scryptSync(password, salt, 64).toString('hex')}`;
+}
+function verifyPassword(password, encoded) {
+  try {
+    const [salt, hash] = encoded.split(':');
+    const actual = crypto.scryptSync(password, salt, 64);
+    const expected = Buffer.from(hash, 'hex');
+    return actual.length === expected.length && crypto.timingSafeEqual(actual, expected);
+  } catch { return false; }
+}
+function publicCourse(course, user, db, detailed = false) {
+  const completionIds = new Set(db.completions.filter(x => user && x.userId === user.id).map(x => x.lessonId));
+  const enrolled = !!(user && db.enrollments.some(x => x.userId === user.id && x.courseId === course.id));
+  const count = course.lessons.filter(x => completionIds.has(x.id)).length;
+  const total = course.lessons.length;
+  const result = {
+    id: course.id, slug: course.slug, title: course.title, description: course.description,
+    category: course.category, level: course.level, duration: course.duration,
+    icon: course.icon, accent: course.accent, outcomes: course.outcomes || [],
+    lessonCount: total, completedCount: count, enrolled,
+    progress: total ? Math.round(100 * count / total) : 0
+  };
+  if (detailed) result.lessons = course.lessons.map(l => ({
+    id: l.id, title: l.title, minutes: l.minutes, lead: l.lead,
+    sections: l.sections, completed: completionIds.has(l.id),
+    quiz: l.quiz ? { question: l.quiz.question, options: l.quiz.options } : null,
+    passed: !!(user && db.quizAttempts.some(x => x.userId === user.id && x.lessonId === l.id && x.correct))
+  }));
+  return result;
+}
+
+function createApp(opts = {}) {
+  const dataFile = path.resolve(opts.dataFile || process.env.DATA_FILE || path.join(__dirname, '.storage', 'unlos.json'));
+  let db;
+  try { db = JSON.parse(fs.readFileSync(dataFile, 'utf8')); }
+  catch (e) {
+    if (e.code !== 'ENOENT') throw e;
+    db = { users: [], sessions: [], enrollments: [], completions: [], quizAttempts: [], courses: structuredClone(seedCourses) };
+  }
+  for (const key of ['users', 'sessions', 'enrollments', 'completions', 'quizAttempts', 'courses']) {
+    if (!Array.isArray(db[key])) throw new Error(`Invalid database: ${key}`);
+  }
+  function save() {
+    fs.mkdirSync(path.dirname(dataFile), { recursive: true });
+    const tmp = `${dataFile}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(db, null, 2), { mode: 0o600 });
+    fs.renameSync(tmp, dataFile);
+  }
+  const adminEmail = cleanEmail(opts.adminEmail || process.env.ADMIN_EMAIL || '');
+  const adminPassword = opts.adminPassword || process.env.ADMIN_PASSWORD || '';
+  if (adminEmail && adminPassword.length >= 12 && !db.users.some(u => u.email === adminEmail)) {
+    db.users.push({ id: id(), name: 'Instructor', email: adminEmail, password: hashPassword(adminPassword), role: 'admin', joinedAt: new Date().toISOString() });
+  }
+  save();
+  const attempts = new Map();
+  const json = (res, status, value) => {
+    res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+    res.end(JSON.stringify(value));
+  };
+  const fail = (res, status, message) => json(res, status, { error: message });
+  const cookie = req => {
+    const match = (req.headers.cookie || '').match(/(?:^|;\s*)unlos_session=([^;]+)/);
+    return match ? match[1] : '';
+  };
+  const currentUser = req => {
+    const token = cookie(req);
+    if (!token) return null;
+    const session = db.sessions.find(s => s.tokenHash === sha(token) && s.expiresAt > Date.now());
+    return session ? db.users.find(u => u.id === session.userId) || null : null;
+  };
+  const profile = u => u ? { id: u.id, name: u.name, email: u.email, role: u.role, joinedAt: u.joinedAt } : null;
+  const authenticated = (res, user) => !!user || (fail(res, 401, 'Please sign in to continue.'), false);
+  const instructor = (res, user) => authenticated(res, user) && (user.role === 'admin' || (fail(res, 403, 'Instructor access required.'), false));
+  const makeSession = (res, user) => {
+    const token = crypto.randomBytes(32).toString('hex');
+    db.sessions.push({ userId: user.id, tokenHash: sha(token), expiresAt: Date.now() + ttl });
+    save();
+    const secure = process.env.NODE_ENV === 'production' ? '; Secure' : '';
+    res.setHeader('Set-Cookie', `unlos_session=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${ttl / 1000}${secure}`);
+  };
+  async function body(req) {
+    const pieces = []; let count = 0;
+    for await (const part of req) {
+      count += part.length;
+      if (count > 64 * 1024) { const err = new Error('Request is too large.'); err.status = 413; throw err; }
+      pieces.push(part);
+    }
+    try { return JSON.parse(Buffer.concat(pieces).toString('utf8') || '{}'); }
+    catch { const err = new Error('Invalid JSON body.'); err.status = 400; throw err; }
+  }
+  const answerJson = (req, res, status, data) => json(res, status, data);
+
+  async function api(req, res, pathname) {
+    const user = currentUser(req), method = req.method;
+    if (pathname === '/api/health' && method === 'GET') return json(res, 200, { ok: true, service: 'UNLOS' });
+    if (pathname === '/api/me' && method === 'GET') return json(res, 200, { user: profile(user) });
+    if (pathname === '/api/auth/register' && method === 'POST') {
+      const data = await body(req);
+      const name = safeText(data.name, 80), email = cleanEmail(data.email), password = data.password;
+      if (name.length < 2 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || typeof password !== 'string' || password.length < 8 || password.length > 200) return fail(res, 400, 'Enter a name, valid email and password of at least 8 characters.');
+      if (db.users.some(u => u.email === email)) return fail(res, 409, 'An account already exists with this email.');
+      const fresh = { id: id(), name, email, password: hashPassword(password), role: 'student', joinedAt: new Date().toISOString() };
+      db.users.push(fresh); makeSession(res, fresh);
+      return json(res, 201, { user: profile(fresh) });
+    }
+    if (pathname === '/api/auth/login' && method === 'POST') {
+      const ip = req.socket.remoteAddress || 'unknown', now = Date.now();
+      const state = attempts.get(ip) || { count: 0, start: now };
+      if (now - state.start > 15 * 60 * 1000) { state.count = 0; state.start = now; }
+      if (state.count >= 15) return fail(res, 429, 'Too many attempts. Please try again later.');
+      const data = await body(req); const email = cleanEmail(data.email);
+      const match = db.users.find(u => u.email === email);
+      if (!match || typeof data.password !== 'string' || !verifyPassword(data.password, match.password)) {
+        state.count++; attempts.set(ip, state);
+        return fail(res, 401, 'Invalid email or password.');
+      }
+      attempts.delete(ip); makeSession(res, match);
+      return json(res, 200, { user: profile(match) });
+    }
+    if (pathname === '/api/auth/logout' && method === 'POST') {
+      db.sessions = db.sessions.filter(s => s.tokenHash !== sha(cookie(req)));
+      save(); res.setHeader('Set-Cookie', 'unlos_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0');
+      return json(res, 200, { ok: true });
+    }
+    if (pathname === '/api/courses' && method === 'GET') return json(res, 200, { courses: db.courses.map(c => publicCourse(c, user, db)) });
+    const single = pathname.match(/^\/api\/courses\/([a-z0-9-]+)$/);
+    if (single && method === 'GET') {
+      const course = db.courses.find(c => c.slug === single[1]);
+      return course ? json(res, 200, { course: publicCourse(course, user, db, true) }) : fail(res, 404, 'Course not found.');
+    }
+    const enroll = pathname.match(/^\/api\/courses\/([a-z0-9-]+)\/enroll$/);
+    if (enroll && method === 'POST') {
+      if (!authenticated(res, user)) return;
+      const course = db.courses.find(c => c.slug === enroll[1]);
+      if (!course) return fail(res, 404, 'Course not found.');
+      if (!db.enrollments.some(e => e.userId === user.id && e.courseId === course.id)) {
+        db.enrollments.push({ userId: user.id, courseId: course.id, joinedAt: new Date().toISOString() }); save();
+      }
+      return json(res, 200, { course: publicCourse(course, user, db, true) });
+    }
+    if (pathname === '/api/dashboard' && method === 'GET') {
+      if (!authenticated(res, user)) return;
+      const courses = db.courses.filter(c => db.enrollments.some(e => e.userId === user.id && e.courseId === c.id)).map(c => publicCourse(c, user, db));
+      const completedLessons = db.completions.filter(c => c.userId === user.id).length;
+      const passedQuizzes = new Set(db.quizAttempts.filter(q => q.userId === user.id && q.correct).map(q => q.lessonId)).size;
+      return json(res, 200, { courses, stats: { enrolledCourses: courses.length, completedLessons, passedQuizzes, finishedCourses: courses.filter(c => c.lessonCount && c.progress === 100).length }, user: profile(user) });
+    }
+    const complete = pathname.match(/^\/api\/lessons\/([a-zA-Z0-9-]+)\/complete$/);
+    if (complete && method === 'POST') {
+      if (!authenticated(res, user)) return;
+      const course = db.courses.find(c => c.lessons.some(l => l.id === complete[1]));
+      if (!course) return fail(res, 404, 'Lesson not found.');
+      if (!db.enrollments.some(e => e.userId === user.id && e.courseId === course.id)) return fail(res, 403, 'Enroll in the course first.');
+      if (!db.completions.some(c => c.userId === user.id && c.lessonId === complete[1])) {
+        db.completions.push({ userId: user.id, lessonId: complete[1], completedAt: new Date().toISOString() }); save();
+      }
+      return json(res, 200, { course: publicCourse(course, user, db, true) });
+    }
+    const quizRoute = pathname.match(/^\/api\/lessons\/([a-zA-Z0-9-]+)\/quiz$/);
+    if (quizRoute && method === 'POST') {
+      if (!authenticated(res, user)) return;
+      const course = db.courses.find(c => c.lessons.some(l => l.id === quizRoute[1]));
+      if (!course) return fail(res, 404, 'Lesson not found.');
+      if (!db.enrollments.some(e => e.userId === user.id && e.courseId === course.id)) return fail(res, 403, 'Enroll in the course first.');
+      const lesson = course.lessons.find(l => l.id === quizRoute[1]);
+      if (!lesson.quiz) return fail(res, 404, 'Quiz not found.');
+      const data = await body(req);
+      if (!Number.isInteger(data.answer) || data.answer < 0 || data.answer >= lesson.quiz.options.length) return fail(res, 400, 'Select a valid answer.');
+      const correct = data.answer === lesson.quiz.answer;
+      db.quizAttempts.push({ userId: user.id, lessonId: lesson.id, correct, attemptedAt: new Date().toISOString() }); save();
+      return json(res, 200, { correct, answer: lesson.quiz.answer, explanation: lesson.quiz.explanation });
+    }
+    if (pathname === '/api/admin/courses' && method === 'POST') {
+      if (!instructor(res, user)) return;
+      const data = await body(req), title = safeText(data.title, 100), description = safeText(data.description, 400);
+      const category = safeText(data.category, 40) || 'General', level = safeText(data.level, 30) || 'Beginner';
+      const baseSlug = slugify(title);
+      if (title.length < 4 || description.length < 20 || !baseSlug) return fail(res, 400, 'Give the course a title and a description of at least 20 characters.');
+      let slug = baseSlug, n = 2;
+      while (db.courses.some(c => c.slug === slug)) slug = `${baseSlug}-${n++}`;
+      const course = { id: id(), slug, title, description, category, level, duration: 'Self-paced', icon: 'book', accent: ['violet', 'blue', 'peach', 'mint'][db.courses.length % 4], outcomes: [], lessons: [] };
+      db.courses.push(course); save();
+      return json(res, 201, { course: publicCourse(course, user, db, true) });
+    }
+    const addLesson = pathname.match(/^\/api\/admin\/courses\/([a-z0-9-]+)\/lessons$/);
+    if (addLesson && method === 'POST') {
+      if (!instructor(res, user)) return;
+      const course = db.courses.find(c => c.slug === addLesson[1]);
+      if (!course) return fail(res, 404, 'Course not found.');
+      const data = await body(req), title = safeText(data.title, 100), content = safeText(data.content, 8000), lead = safeText(data.lead, 250);
+      if (title.length < 3 || content.length < 30) return fail(res, 400, 'The lesson needs a title and at least 30 characters of content.');
+      const entry = { id: id(), title, minutes: Math.min(180, Math.max(1, Number(data.minutes) || 15)), lead: lead || 'Read the lesson and mark it complete.', sections: [{ heading: title, body: content, bullets: [] }], quiz: null };
+      course.lessons.push(entry); save();
+      return json(res, 201, { course: publicCourse(course, user, db, true) });
+    }
+    return fail(res, 404, 'API route not found.');
+  }
+
+  async function handle(req, res) {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('Content-Security-Policy', "default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'");
+    const pathname = new URL(req.url || '/', 'http://localhost').pathname;
+    try {
+      if (pathname.startsWith('/api/')) {
+        if (!['GET', 'POST'].includes(req.method)) return fail(res, 405, 'Method not allowed.');
+        if (req.method === 'POST') {
+          const origin = req.headers.origin;
+          if (origin) {
+            let valid = false;
+            try { valid = new URL(origin).host === req.headers.host; } catch { /* invalid origin */ }
+            if (!valid) return fail(res, 403, 'Cross-origin request rejected.');
+          }
+          if (req.headers['content-type'] && !req.headers['content-type'].startsWith('application/json')) return fail(res, 415, 'Use application/json.');
+        }
+        return await api(req, res, pathname);
+      }
+      if (!['GET', 'HEAD'].includes(req.method)) return fail(res, 405, 'Method not allowed.');
+      const target = pathname === '/' ? 'index.html' : pathname.slice(1);
+      const file = path.resolve(PUBLIC_DIR, target);
+      if (file !== path.join(PUBLIC_DIR, 'index.html') && !file.startsWith(PUBLIC_DIR + path.sep)) return fail(res, 403, 'Access denied.');
+      const extension = path.extname(file);
+      if (!MIME[extension]) return fail(res, 404, 'Not found.');
+      let stat;
+      try { stat = fs.statSync(file); } catch { return fail(res, 404, 'Not found.'); }
+      if (!stat.isFile()) return fail(res, 404, 'Not found.');
+      res.writeHead(200, { 'Content-Type': MIME[extension], 'Cache-Control': extension === '.html' ? 'no-cache' : 'public, max-age=3600' });
+      if (req.method === 'HEAD') return res.end();
+      fs.createReadStream(file).pipe(res);
+    } catch (e) {
+      if (!res.headersSent) return fail(res, e.status || 500, e.status ? e.message : 'Unexpected server error.');
+      res.end();
+    }
+  }
+  return http.createServer(handle);
+}
+
+if (require.main === module) {
+  const port = Number(process.env.PORT || 3000);
+  createApp().listen(port, '0.0.0.0', () => console.log(`UNLOS running at http://localhost:${port}`));
+}
+module.exports = { createApp };
