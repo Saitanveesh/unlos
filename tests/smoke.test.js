@@ -9,7 +9,7 @@ const { createApp } = require('../server');
 test('UNLOS account, course, quiz, progress and admin workflow', async t => {
   const folder = fs.mkdtempSync(path.join(os.tmpdir(), 'unlos-test-'));
   const file = path.join(folder, 'db.sqlite');
-  const server = createApp({ dataFile: file, adminEmail: 'instructor@example.com', adminPassword: 'a-strong-admin-password' });
+  const server = createApp({ dbFile: file, adminEmail: 'instructor@example.com', adminPassword: 'a-strong-admin-password' });
   await new Promise(ok => server.listen(0, '127.0.0.1', ok));
   t.after(async () => { await new Promise(ok => server.close(ok)); fs.rmSync(folder, { recursive: true, force: true }); });
   const host = `http://127.0.0.1:${server.address().port}`;
@@ -70,7 +70,7 @@ test('UNLOS account, course, quiz, progress and admin workflow', async t => {
 
 test('static assets and HTTP method/origin safeguards', async t => {
   const folder = fs.mkdtempSync(path.join(os.tmpdir(), 'unlos-test-'));
-  const server = createApp({ dataFile: path.join(folder, 'db.sqlite') });
+  const server = createApp({ dbFile: path.join(folder, 'db.sqlite') });
   await new Promise(ok => server.listen(0, '127.0.0.1', ok));
   t.after(async () => { await new Promise(ok => server.close(ok)); fs.rmSync(folder, { recursive: true, force: true }); });
   const host = `http://127.0.0.1:${server.address().port}`;
