@@ -1,0 +1,10 @@
+.git
+.github
+.env
+.storage
+node_modules
+backups
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.log
