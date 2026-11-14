@@ -48,6 +48,14 @@ async function request(path, options = {}) {
   return data;
 }
 const post = (url, object = {}) => request(url, { method: 'POST', body: JSON.stringify(object) });
+const patch = (url, object = {}) => request(url, { method: 'PATCH', body: JSON.stringify(object) });
+const remove = url => request(url, { method: 'DELETE' });
+const quizFields = values => {
+  const question = (values.question || '').trim();
+  if (!question) return undefined;
+  return { question, options: (values.options || '').split(/\r?\n/).map(x => x.trim()).filter(Boolean),
+    answer: Number(values.answer) - 1, explanation: (values.explanation || '').trim() };
+};
 const refreshCourses = async () => { state.courses = (await request('/api/courses')).courses; };
 const showToast = (message, error = false) => {
   const old = document.querySelector('.toast'); if (old) old.remove();
@@ -70,6 +78,7 @@ function sidebar(route) {
     <a class="side-link${active('dashboard')}" href="#/dashboard">${icon('chart')} My learning</a>
     <div class="side-label">CATEGORIES</div>
     ${categories.slice(1).map(cat => `<a href="#/courses" class="side-link" data-category="${esc(cat)}">${icon(cat === 'Development' ? 'code' : cat === 'Programming' ? 'terminal' : cat === 'Design' ? 'palette' : 'briefcase')} ${esc(cat)}</a>`).join('')}
+    ${state.user ? `<div class="side-label">ACCOUNT</div><a href="#/profile" class="side-link${active('profile')}">${icon('user')} My profile</a>` : ''}
     ${state.user?.role === 'admin' ? `<div class="side-label">INSTRUCTOR</div><a href="#/admin" class="side-link${active('admin')}">${icon('plus')} Course management</a>` : ''}
     <div class="sidebar-bottom"><div class="help-card"><div class="help-title">Make time to learn ${icon('spark', 14)}</div><p>Even 15 minutes a day can move you forward.</p><a class="small-link" href="#/courses">Find a course ${icon('arrow', 13)}</a></div>
       <div class="side-account"><span class="avatar">${initials(state.user?.name)}</span><div><div class="person-name">${esc(state.user?.name || 'Guest learner')}</div><div class="person-role">${state.user ? (state.user.role === 'admin' ? 'Instructor' : 'Student account') : 'Explore for free'}</div></div></div>
@@ -151,10 +160,90 @@ function auth(kind) {
   return `<div class="auth-wrap"><div class="auth-card"><div class="auth-icon">${icon(signup ? 'cap' : 'user', 27)}</div><h1 class="auth-title">${signup ? 'Start learning with UNLOS' : 'Welcome back'}</h1><p class="auth-desc">${signup ? 'Create your free account to save courses, lessons and quiz progress.' : 'Log in to continue learning at your own pace.'}</p>
     <form id="auth-form" data-kind="${kind}"><div id="auth-error"></div>${signup ? `<div class="form-group"><label for="auth-name">Full name</label><input class="input" id="auth-name" name="name" autocomplete="name" minlength="2" required placeholder="Your name"></div>` : ''}<div class="form-group"><label for="auth-email">Email address</label><input class="input" id="auth-email" name="email" type="email" autocomplete="email" required placeholder="you@example.com"></div><div class="form-group"><label for="auth-password">Password</label><input class="input" id="auth-password" name="password" type="password" autocomplete="${signup ? 'new-password' : 'current-password'}" minlength="${signup ? 8 : 1}" required placeholder="${signup ? 'At least 8 characters' : 'Enter your password'}"></div><button class="btn primary full" type="submit">${signup ? 'Create free account' : 'Log in'} ${icon('arrow', 17)}</button></form><div class="auth-footer">${signup ? 'Already have an account?' : 'New to UNLOS?'} <a href="#/${signup ? 'signin' : 'signup'}">${signup ? 'Log in' : 'Create an account'}</a></div></div></div>`;
 }
-function admin() {
-  if (state.user?.role !== 'admin') return `<div class="empty-state"><h3>Instructor access only</h3><p>This page is available to instructor accounts.</p><a class="btn primary" href="#/">Back to home</a></div>`;
-  return `${intro('Course management', 'Add your own course and lessons to the learning catalog.')}<div class="section-head"><h2 class="section-title">Publish content</h2></div><div class="admin-forms"><form id="new-course"><h3>Create a course</h3><p>A new course will appear in Explore courses immediately.</p><div class="form-group"><label>Course title</label><input class="input" name="title" minlength="4" maxlength="100" placeholder="e.g. Intro to Computer Networks" required></div><div class="form-group"><label>Short description</label><textarea class="input" name="description" minlength="20" maxlength="400" required placeholder="What will students learn in this course?"></textarea></div><div class="form-group"><label>Category</label><select class="input" name="category"><option>Development</option><option>Programming</option><option>Design</option><option>Career</option><option>General</option></select></div><div class="form-group"><label>Difficulty</label><select class="input" name="level"><option>Beginner</option><option>Intermediate</option><option>All levels</option></select></div><button class="btn primary" type="submit">${icon('plus', 16)} Create course</button></form>
-    <form id="new-lesson"><h3>Add a lesson</h3><p>Choose an existing course, then write the lesson content.</p><div class="form-group"><label>Course</label><select class="input" name="slug" required>${state.courses.map(c => `<option value="${esc(c.slug)}">${esc(c.title)}</option>`).join('')}</select></div><div class="form-group"><label>Lesson title</label><input class="input" name="title" minlength="3" required placeholder="e.g. Understanding IP addresses"></div><div class="form-group"><label>Lesson summary</label><input class="input" name="lead" maxlength="250" placeholder="One sentence overview"></div><div class="form-group"><label>Reading time (minutes)</label><input class="input" name="minutes" type="number" min="1" max="180" value="15"></div><div class="form-group"><label>Lesson content</label><textarea class="input" name="content" minlength="30" required placeholder="Write the complete lesson here..."></textarea></div><button class="btn primary" type="submit">${icon('plus', 16)} Add lesson</button></form></div>`;
+
+function profilePage() {
+  if (!state.user) return '<div class="empty-state"><h3>Please sign in</h3><a class="btn primary" href="#/signin">Sign in</a></div>';
+  return `${intro('My profile', 'Manage your account details and password.')}
+    <div class="admin-forms account-forms">
+      <form class="surface" id="account-profile"><h3>Personal details</h3>
+        <div class="form-group"><label for="profile-name">Full name</label><input class="input" id="profile-name" name="name" minlength="2" maxlength="80" value="${esc(state.user.name)}" required></div>
+        <div class="form-group"><label>Email address</label><input class="input" value="${esc(state.user.email)}" disabled></div>
+        <button class="btn primary" type="submit">Save changes</button></form>
+      <form class="surface" id="account-password"><h3>Change password</h3><p>Use a unique password with at least 10 characters.</p>
+        <div class="form-group"><label>Current password</label><input class="input" name="currentPassword" type="password" autocomplete="current-password" required></div>
+        <div class="form-group"><label>New password</label><input class="input" name="newPassword" type="password" minlength="10" maxlength="200" autocomplete="new-password" required></div>
+        <button class="btn primary" type="submit">Update password</button></form>
+    </div>`;
+}
+function courseManageItem(course) {
+  const published = course.published !== false;
+  return `<article class="manage-course">
+      <div class="manage-head"><div><div class="manage-top"><h3>${esc(course.title)}</h3><span class="manage-pill ${published ? 'live' : 'draft'}">${published ? 'Published' : 'Draft'}</span></div>
+      <p class="muted small">${esc(course.category)} · ${plural(course.lessonCount, 'lesson')} · ${esc(course.level)}</p></div>
+      <div class="manage-actions"><button class="btn ${published ? 'line' : 'primary'} small-btn" data-publish-course="${esc(course.slug)}" data-next-published="${published ? 'false' : 'true'}">${published ? 'Unpublish' : 'Publish'}</button><button class="btn line small-btn danger-text" data-delete-course="${esc(course.slug)}">Delete</button></div></div>
+      <details class="manage-details"><summary>Edit course information</summary>
+      <form class="manage-edit-form" id="edit-course" data-slug="${esc(course.slug)}">
+        <div class="form-group"><label>Title</label><input class="input" name="title" maxlength="100" minlength="4" value="${esc(course.title)}" required></div>
+        <div class="form-group"><label>Description</label><textarea class="input" name="description" minlength="20" maxlength="400" required>${esc(course.description)}</textarea></div>
+        <div class="admin-mini-grid"><div class="form-group"><label>Category</label><input class="input" name="category" maxlength="40" value="${esc(course.category)}"></div><div class="form-group"><label>Level</label><input class="input" name="level" maxlength="30" value="${esc(course.level)}"></div></div>
+        <div class="form-group"><label>Duration</label><input class="input" name="duration" maxlength="40" value="${esc(course.duration)}"></div>
+        <button class="btn primary small-btn" type="submit">Save course</button>
+      </form></details>
+      <details class="manage-details"><summary>Manage lessons (${course.lessonCount})</summary>
+      ${course.lessons.map((lesson, i) => `<div class="manage-lesson"><div class="manage-lesson-header"><strong>${i + 1}. ${esc(lesson.title)}</strong><button class="btn line small-btn danger-text" data-delete-lesson="${esc(lesson.id)}">Delete lesson</button></div>
+        <form id="edit-lesson" data-id="${esc(lesson.id)}">
+          <div class="form-group"><label>Lesson title</label><input class="input" name="title" value="${esc(lesson.title)}" minlength="3" maxlength="100" required></div>
+          <div class="form-group"><label>Summary</label><input class="input" name="lead" value="${esc(lesson.lead)}" maxlength="250"></div>
+          <div class="form-group"><label>Minutes</label><input class="input" name="minutes" type="number" min="1" max="180" value="${lesson.minutes}"></div>
+          <div class="form-group"><label>Lesson text</label><textarea class="input" name="content" minlength="30" maxlength="8000" required>${esc(lesson.sections.map(s => s.body).join('\n\n'))}</textarea></div>
+          <details class="quiz-editor"><summary>${lesson.quiz ? 'Replace existing quiz' : 'Add an optional quiz'}</summary>
+            <p class="muted small">Leave the question empty to keep the current quiz. Each option goes on its own line.</p>
+            <div class="form-group"><label>Question</label><input class="input" name="question" maxlength="300" placeholder="e.g. Which protocol assigns IP addresses?"></div>
+            <div class="form-group"><label>Answer options</label><textarea class="input" name="options" placeholder="Option one&#10;Option two&#10;Option three"></textarea></div>
+            <div class="form-group"><label>Correct option number (1–6)</label><input class="input" name="answer" type="number" min="1" max="6" value="1"></div>
+            <div class="form-group"><label>Explanation</label><input class="input" name="explanation" maxlength="500"></div>
+          </details>
+          <button class="btn primary small-btn" type="submit">Save lesson</button>
+        </form></div>`).join('') || '<p class="muted small">No lessons yet. Add one below.</p>'}
+      </details>
+    </article>`;
+}
+async function admin() {
+  if (state.user?.role !== 'admin') return '<div class="empty-state"><h3>Instructor access only</h3><p>Sign in as an instructor to manage content.</p><a href="#/" class="btn primary">Back to home</a></div>';
+  const [{ stats }, courses] = await Promise.all([
+    request('/api/admin/overview'),
+    Promise.all(state.courses.map(c => request('/api/courses/' + encodeURIComponent(c.slug)).then(x => x.course)))
+  ]);
+  return `${intro('Instructor studio', 'Build courses, manage lessons and publish when ready.')}
+    <div class="feature-stats admin-stats">
+      ${stat(stats.students, 'Students', '', 'user')}
+      ${stat(stats.publishedCourses, 'Published courses', 'blue', 'book')}
+      ${stat(stats.enrollments, 'Total enrollments', 'orange', 'chart')}
+    </div>
+    <div class="section-head"><div><h2 class="section-title">Your courses</h2><p class="section-description">New courses start as drafts and can be published after adding lessons.</p></div></div>
+    <section class="surface manage-list">${courses.map(courseManageItem).join('') || '<p>No courses created yet.</p>'}</section>
+    <div class="section-head"><h2 class="section-title">Create learning content</h2></div>
+    <div class="admin-forms">
+      <form id="new-course"><h3>New course</h3><p>Set up the course details. It will remain private until published.</p>
+        <div class="form-group"><label>Course title</label><input class="input" name="title" minlength="4" maxlength="100" required placeholder="e.g. Introduction to Computer Networks"></div>
+        <div class="form-group"><label>Short description</label><textarea class="input" name="description" minlength="20" maxlength="400" required placeholder="What will students learn?"></textarea></div>
+        <div class="form-group"><label>Category</label><select class="input" name="category"><option>Development</option><option>Programming</option><option>Design</option><option>Career</option><option>General</option></select></div>
+        <div class="form-group"><label>Level</label><select class="input" name="level"><option>Beginner</option><option>Intermediate</option><option>All levels</option></select></div>
+        <button class="btn primary" type="submit">${icon('plus', 16)} Create draft course</button>
+      </form>
+      <form id="new-lesson"><h3>New lesson</h3><p>Add readable content and an optional graded knowledge check.</p>
+        <div class="form-group"><label>Course</label><select class="input" name="slug" required>${state.courses.map(c => `<option value="${esc(c.slug)}">${esc(c.title)}</option>`).join('')}</select></div>
+        <div class="form-group"><label>Lesson title</label><input class="input" name="title" minlength="3" maxlength="100" required></div>
+        <div class="form-group"><label>Short summary</label><input class="input" name="lead" maxlength="250"></div>
+        <div class="form-group"><label>Reading time (minutes)</label><input class="input" name="minutes" type="number" min="1" max="180" value="15"></div>
+        <div class="form-group"><label>Lesson content</label><textarea class="input" name="content" minlength="30" maxlength="8000" required></textarea></div>
+        <details class="quiz-editor"><summary>Optional quiz</summary><div class="form-group"><label>Question</label><input class="input" name="question" maxlength="300"></div>
+          <div class="form-group"><label>Answer options (one per line)</label><textarea class="input" name="options"></textarea></div>
+          <div class="form-group"><label>Correct option number</label><input class="input" name="answer" type="number" min="1" max="6" value="1"></div>
+          <div class="form-group"><label>Explanation</label><input class="input" name="explanation" maxlength="500"></div></details>
+        <button class="btn primary" type="submit">${icon('plus', 16)} Add lesson</button>
+      </form>
+    </div>`;
 }
 function notFound() { return `<div class="empty-state"><h3>Page not found</h3><p>This address does not match a course or page.</p><a href="#/" class="btn primary">Back to home</a></div>`; }
 
@@ -175,7 +264,8 @@ async function render() {
     }
     else if (route === 'dashboard') content = await dashboard();
     else if (route === 'signup' || route === 'signin') content = auth(route);
-    else if (route === 'admin') content = admin();
+    else if (route === 'admin') content = await admin();
+    else if (route === 'profile') content = profilePage();
     else content = notFound();
   } catch (e) { content = `<div class="empty-state"><h3>Unable to load this page</h3><p>${esc(e.message)}</p><a href="#/" class="btn primary">Back to home</a></div>`; }
   if (version !== renderVersion) return;
@@ -185,7 +275,7 @@ async function render() {
 
 window.addEventListener('hashchange', render);
 document.addEventListener('click', async event => {
-  const button = event.target.closest('[data-mobile],[data-close-menu],[data-category],[data-enroll],[data-logout],[data-complete],[data-clear-filters],[data-requires-enroll]');
+  const button = event.target.closest('[data-mobile],[data-close-menu],[data-category],[data-enroll],[data-logout],[data-complete],[data-clear-filters],[data-requires-enroll],[data-publish-course],[data-delete-course],[data-delete-lesson]');
   if (!button) return;
   if (button.matches('[data-mobile]')) { state.menu = !state.menu; app.querySelector('.sidebar')?.classList.toggle('open', state.menu); app.querySelector('.overlay')?.classList.toggle('visible', state.menu); return; }
   if (button.matches('[data-close-menu]')) { state.menu = false; app.querySelector('.sidebar')?.classList.remove('open'); app.querySelector('.overlay')?.classList.remove('visible'); return; }
@@ -210,6 +300,30 @@ document.addEventListener('click', async event => {
     catch (e) { showToast(e.message, true); button.disabled = false; }
     return;
   }
+
+  if (button.matches('[data-publish-course]')) {
+    button.disabled = true;
+    try {
+      await patch('/api/admin/courses/' + encodeURIComponent(button.dataset.publishCourse),
+        { published: button.dataset.nextPublished === 'true' });
+      await refreshCourses(); showToast('Course visibility updated.'); render();
+    } catch(e) { showToast(e.message, true); button.disabled = false; }
+    return;
+  }
+  if (button.matches('[data-delete-course]')) {
+    if (!window.confirm('Delete this course, all its lessons and student progress? This cannot be undone.')) return;
+    try { await remove('/api/admin/courses/' + encodeURIComponent(button.dataset.deleteCourse));
+      await refreshCourses(); showToast('Course deleted.'); render(); }
+    catch(e) { showToast(e.message, true); }
+    return;
+  }
+  if (button.matches('[data-delete-lesson]')) {
+    if (!window.confirm('Delete this lesson and its quiz results?')) return;
+    try { await remove('/api/admin/lessons/' + encodeURIComponent(button.dataset.deleteLesson));
+      await refreshCourses(); showToast('Lesson deleted.'); render(); }
+    catch(e) { showToast(e.message, true); }
+    return;
+  }
   if (button.matches('[data-logout]')) {
     try { await post('/api/auth/logout'); state.user = null; await refreshCourses(); navigate('#/'); render(); showToast('Signed out successfully.'); }
     catch (e) { showToast(e.message, true); }
@@ -226,7 +340,7 @@ document.addEventListener('input', event => {
 });
 document.addEventListener('submit', async event => {
   const form = event.target;
-  if (!['auth-form', 'quiz-form', 'new-course', 'new-lesson'].includes(form.id)) return;
+  if (!['auth-form', 'quiz-form', 'new-course', 'new-lesson', 'edit-course', 'edit-lesson', 'account-profile', 'account-password'].includes(form.id)) return;
   event.preventDefault(); const submit = form.querySelector('button[type="submit"]'); if (submit) submit.disabled = true;
   try {
     if (form.id === 'auth-form') {
@@ -244,7 +358,29 @@ document.addEventListener('submit', async event => {
       showToast(`Course "${result.course.title}" created.`); render();
     } else if (form.id === 'new-lesson') {
       const data = Object.fromEntries(new FormData(form)); const slug = data.slug; delete data.slug;
-      await post(`/api/admin/courses/${slug}/lessons`, data); await refreshCourses(); showToast('New lesson added.'); render();
+      const quiz = quizFields(data);
+      for (const key of ['question', 'options', 'answer', 'explanation']) delete data[key];
+      if (quiz) data.quiz = quiz;
+      await post(`/api/admin/courses/${encodeURIComponent(slug)}/lessons`, data);
+      await refreshCourses(); showToast('New lesson added.'); render();
+
+    } else if (form.id === 'edit-course') {
+      await patch('/api/admin/courses/' + encodeURIComponent(form.dataset.slug), Object.fromEntries(new FormData(form)));
+      await refreshCourses(); showToast('Course updated.'); render();
+    } else if (form.id === 'edit-lesson') {
+      const data = Object.fromEntries(new FormData(form));
+      const quiz = quizFields(data);
+      for (const key of ['question', 'options', 'answer', 'explanation']) delete data[key];
+      if (quiz) data.quiz = quiz;
+      await patch('/api/admin/lessons/' + encodeURIComponent(form.dataset.id), data);
+      showToast('Lesson updated.'); render();
+    } else if (form.id === 'account-profile') {
+      state.user = (await patch('/api/account/profile', Object.fromEntries(new FormData(form)))).user;
+      showToast('Profile saved.'); render();
+    } else if (form.id === 'account-password') {
+      await post('/api/account/password', Object.fromEntries(new FormData(form)));
+      showToast('Password updated.'); form.reset();
+      if (submit) submit.disabled = false;
     }
   } catch (e) {
     if (form.id === 'auth-form') { const el = document.querySelector('#auth-error'); if (el) el.innerHTML = `<div class="error-message">${esc(e.message)}</div>`; }

@@ -112,7 +112,9 @@ function createApp(opts = {}) {
 
   async function api(req, res, pathname) {
     const user = currentUser(req), method = req.method;
-    if (pathname === '/api/health' && method === 'GET') return json(res, 200, { ok: true, service: 'UNLOS' });
+    if (pathname === '/api/health') return method === 'GET'
+      ? json(res, 200, { ok: true, service: 'UNLOS', storage: 'sqlite' })
+      : fail(res, 405, 'Method not allowed.');
     if (pathname === '/api/me' && method === 'GET') return json(res, 200, { user: profile(user) });
     if (pathname === '/api/auth/register' && method === 'POST') {
       const data = await body(req);
