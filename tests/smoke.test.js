@@ -8,7 +8,7 @@ const { createApp } = require('../server');
 
 test('UNLOS account, course, quiz, progress and admin workflow', async t => {
   const folder = fs.mkdtempSync(path.join(os.tmpdir(), 'unlos-test-'));
-  const file = path.join(folder, 'db.json');
+  const file = path.join(folder, 'db.sqlite');
   const server = createApp({ dataFile: file, adminEmail: 'instructor@example.com', adminPassword: 'a-strong-admin-password' });
   await new Promise(ok => server.listen(0, '127.0.0.1', ok));
   t.after(async () => { await new Promise(ok => server.close(ok)); fs.rmSync(folder, { recursive: true, force: true }); });
@@ -60,15 +60,17 @@ test('UNLOS account, course, quiz, progress and admin workflow', async t => {
   assert.equal(result.status, 201);
   assert.equal(result.json.course.lessonCount, 1);
   assert.equal((await api('/api/courses')).json.courses.length, 5);
-  const persisted = JSON.parse(fs.readFileSync(file, 'utf8'));
-  assert.equal(persisted.courses.length, 5);
-  assert.equal(persisted.completions.length, 1);
+  const { DatabaseSync } = require('node:sqlite');
+  const persisted = new DatabaseSync(file);
+  assert.equal(persisted.prepare("SELECT COUNT(*) AS n FROM records WHERE entity = 'courses'").get().n, 5);
+  assert.equal(persisted.prepare("SELECT COUNT(*) AS n FROM records WHERE entity = 'completions'").get().n, 1);
+  persisted.close();
   assert.ok(adminCookieBefore);
 });
 
 test('static assets and HTTP method/origin safeguards', async t => {
   const folder = fs.mkdtempSync(path.join(os.tmpdir(), 'unlos-test-'));
-  const server = createApp({ dataFile: path.join(folder, 'db.json') });
+  const server = createApp({ dataFile: path.join(folder, 'db.sqlite') });
   await new Promise(ok => server.listen(0, '127.0.0.1', ok));
   t.after(async () => { await new Promise(ok => server.close(ok)); fs.rmSync(folder, { recursive: true, force: true }); });
   const host = `http://127.0.0.1:${server.address().port}`;

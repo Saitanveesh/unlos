@@ -6,6 +6,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { URL } = require('node:url');
 const { courses: seedCourses } = require('./lib/courses');
+const { createStore } = require('./lib/store');
 
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const MIME = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'application/javascript; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon' };
@@ -34,6 +35,7 @@ function publicCourse(course, user, db, detailed = false) {
   const total = course.lessons.length;
   const result = {
     id: course.id, slug: course.slug, title: course.title, description: course.description,
+    published: course.published !== false,
     category: course.category, level: course.level, duration: course.duration,
     icon: course.icon, accent: course.accent, outcomes: course.outcomes || [],
     lessonCount: total, completedCount: count, enrolled,
@@ -48,23 +50,22 @@ function publicCourse(course, user, db, detailed = false) {
   return result;
 }
 
+
+function validatedQuiz(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const question = safeText(raw.question, 300);
+  const options = Array.isArray(raw.options) ? raw.options.map(v => safeText(v, 160)) : [];
+  const explanation = safeText(raw.explanation, 500);
+  if (question.length < 8 || options.length < 2 || options.length > 6 ||
+      options.some(o => o.length < 1) ||
+      !Number.isInteger(raw.answer) || raw.answer < 0 || raw.answer >= options.length) return null;
+  return { question, options, answer: raw.answer, explanation };
+}
+
 function createApp(opts = {}) {
-  const dataFile = path.resolve(opts.dataFile || process.env.DATA_FILE || path.join(__dirname, '.storage', 'unlos.json'));
-  let db;
-  try { db = JSON.parse(fs.readFileSync(dataFile, 'utf8')); }
-  catch (e) {
-    if (e.code !== 'ENOENT') throw e;
-    db = { users: [], sessions: [], enrollments: [], completions: [], quizAttempts: [], courses: structuredClone(seedCourses) };
-  }
-  for (const key of ['users', 'sessions', 'enrollments', 'completions', 'quizAttempts', 'courses']) {
-    if (!Array.isArray(db[key])) throw new Error(`Invalid database: ${key}`);
-  }
-  function save() {
-    fs.mkdirSync(path.dirname(dataFile), { recursive: true });
-    const tmp = `${dataFile}.${process.pid}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify(db, null, 2), { mode: 0o600 });
-    fs.renameSync(tmp, dataFile);
-  }
+  const store = createStore({ ...opts, seedCourses });
+  let db = store.data;
+  function save() { store.save(db); }
   const adminEmail = cleanEmail(opts.adminEmail || process.env.ADMIN_EMAIL || '');
   const adminPassword = opts.adminPassword || process.env.ADMIN_PASSWORD || '';
   if (adminEmail && adminPassword.length >= 12 && !db.users.some(u => u.email === adminEmail)) {
@@ -141,17 +142,17 @@ function createApp(opts = {}) {
       save(); res.setHeader('Set-Cookie', 'unlos_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0');
       return json(res, 200, { ok: true });
     }
-    if (pathname === '/api/courses' && method === 'GET') return json(res, 200, { courses: db.courses.map(c => publicCourse(c, user, db)) });
+    if (pathname === '/api/courses' && method === 'GET') return json(res, 200, { courses: db.courses.filter(c => c.published !== false || user?.role === 'admin').map(c => publicCourse(c, user, db)) });
     const single = pathname.match(/^\/api\/courses\/([a-z0-9-]+)$/);
     if (single && method === 'GET') {
       const course = db.courses.find(c => c.slug === single[1]);
-      return course ? json(res, 200, { course: publicCourse(course, user, db, true) }) : fail(res, 404, 'Course not found.');
+      return course && (course.published !== false || user?.role === 'admin') ? json(res, 200, { course: publicCourse(course, user, db, true) }) : fail(res, 404, 'Course not found.');
     }
     const enroll = pathname.match(/^\/api\/courses\/([a-z0-9-]+)\/enroll$/);
     if (enroll && method === 'POST') {
       if (!authenticated(res, user)) return;
       const course = db.courses.find(c => c.slug === enroll[1]);
-      if (!course) return fail(res, 404, 'Course not found.');
+      if (!course || course.published === false) return fail(res, 404, 'Course not found.');
       if (!db.enrollments.some(e => e.userId === user.id && e.courseId === course.id)) {
         db.enrollments.push({ userId: user.id, courseId: course.id, joinedAt: new Date().toISOString() }); save();
       }
@@ -159,7 +160,7 @@ function createApp(opts = {}) {
     }
     if (pathname === '/api/dashboard' && method === 'GET') {
       if (!authenticated(res, user)) return;
-      const courses = db.courses.filter(c => db.enrollments.some(e => e.userId === user.id && e.courseId === c.id)).map(c => publicCourse(c, user, db));
+      const courses = db.courses.filter(c => c.published !== false && db.enrollments.some(e => e.userId === user.id && e.courseId === c.id)).map(c => publicCourse(c, user, db));
       const completedLessons = db.completions.filter(c => c.userId === user.id).length;
       const passedQuizzes = new Set(db.quizAttempts.filter(q => q.userId === user.id && q.correct).map(q => q.lessonId)).size;
       return json(res, 200, { courses, stats: { enrolledCourses: courses.length, completedLessons, passedQuizzes, finishedCourses: courses.filter(c => c.lessonCount && c.progress === 100).length }, user: profile(user) });
@@ -197,7 +198,7 @@ function createApp(opts = {}) {
       if (title.length < 4 || description.length < 20 || !baseSlug) return fail(res, 400, 'Give the course a title and a description of at least 20 characters.');
       let slug = baseSlug, n = 2;
       while (db.courses.some(c => c.slug === slug)) slug = `${baseSlug}-${n++}`;
-      const course = { id: id(), slug, title, description, category, level, duration: 'Self-paced', icon: 'book', accent: ['violet', 'blue', 'peach', 'mint'][db.courses.length % 4], outcomes: [], lessons: [] };
+      const course = { id: id(), slug, title, description, category, level, published: false, duration: 'Self-paced', icon: 'book', accent: ['violet', 'blue', 'peach', 'mint'][db.courses.length % 4], outcomes: [], lessons: [] };
       db.courses.push(course); save();
       return json(res, 201, { course: publicCourse(course, user, db, true) });
     }
@@ -208,9 +209,124 @@ function createApp(opts = {}) {
       if (!course) return fail(res, 404, 'Course not found.');
       const data = await body(req), title = safeText(data.title, 100), content = safeText(data.content, 8000), lead = safeText(data.lead, 250);
       if (title.length < 3 || content.length < 30) return fail(res, 400, 'The lesson needs a title and at least 30 characters of content.');
-      const entry = { id: id(), title, minutes: Math.min(180, Math.max(1, Number(data.minutes) || 15)), lead: lead || 'Read the lesson and mark it complete.', sections: [{ heading: title, body: content, bullets: [] }], quiz: null };
+      const entry = { id: id(), title, minutes: Math.min(180, Math.max(1, Number(data.minutes) || 15)), lead: lead || 'Read the lesson and mark it complete.', sections: [{ heading: title, body: content, bullets: [] }], quiz: data.quiz ? validatedQuiz(data.quiz) : null };
+      if (data.quiz && !entry.quiz) return fail(res, 400, 'Provide a question, 2 to 6 options and a valid answer index.');
       course.lessons.push(entry); save();
       return json(res, 201, { course: publicCourse(course, user, db, true) });
+    }
+
+    if (pathname === '/api/account/profile' && method === 'PATCH') {
+      if (!authenticated(res, user)) return;
+      const data = await body(req);
+      const name = safeText(data.name, 80);
+      if (name.length < 2) return fail(res, 400, 'Name must contain at least two characters.');
+      user.name = name; save();
+      return json(res, 200, { user: profile(user) });
+    }
+    if (pathname === '/api/account/password' && method === 'POST') {
+      if (!authenticated(res, user)) return;
+      const data = await body(req);
+      if (typeof data.currentPassword !== 'string' || !verifyPassword(data.currentPassword, user.password)) return fail(res, 403, 'Current password is incorrect.');
+      if (typeof data.newPassword !== 'string' || data.newPassword.length < 10 || data.newPassword.length > 200) return fail(res, 400, 'New password must be 10 to 200 characters.');
+      if (data.currentPassword === data.newPassword) return fail(res, 400, 'Choose a different password.');
+      user.password = hashPassword(data.newPassword);
+      db.sessions = db.sessions.filter(session => session.userId !== user.id || session.tokenHash === sha(cookie(req)));
+      save();
+      return json(res, 200, { ok: true });
+    }
+    if (pathname === '/api/admin/overview' && method === 'GET') {
+      if (!instructor(res, user)) return;
+      return json(res, 200, { stats: {
+        students: db.users.filter(u => u.role === 'student').length,
+        courses: db.courses.length,
+        publishedCourses: db.courses.filter(c => c.published !== false).length,
+        enrollments: db.enrollments.length,
+        completedLessons: db.completions.length,
+        quizAttempts: db.quizAttempts.length
+      } });
+    }
+    const manageCourse = pathname.match(/^\/api\/admin\/courses\/([a-z0-9-]+)$/);
+    if (manageCourse && (method === 'PATCH' || method === 'DELETE')) {
+      if (!instructor(res, user)) return;
+      const course = db.courses.find(c => c.slug === manageCourse[1]);
+      if (!course) return fail(res, 404, 'Course not found.');
+      if (method === 'DELETE') {
+        const lessonIds = new Set(course.lessons.map(l => l.id));
+        db.courses = db.courses.filter(c => c.id !== course.id);
+        db.enrollments = db.enrollments.filter(e => e.courseId !== course.id);
+        db.completions = db.completions.filter(c => !lessonIds.has(c.lessonId));
+        db.quizAttempts = db.quizAttempts.filter(a => !lessonIds.has(a.lessonId));
+        save();
+        return json(res, 200, { ok: true });
+      }
+      const data = await body(req);
+      if (data.title !== undefined) {
+        const title = safeText(data.title, 100);
+        if (title.length < 4) return fail(res, 400, 'Course title must contain at least four characters.');
+        course.title = title;
+      }
+      if (data.description !== undefined) {
+        const description = safeText(data.description, 400);
+        if (description.length < 20) return fail(res, 400, 'Description must contain at least 20 characters.');
+        course.description = description;
+      }
+      if (data.category !== undefined) course.category = safeText(data.category, 40) || 'General';
+      if (data.level !== undefined) course.level = safeText(data.level, 30) || 'Beginner';
+      if (data.duration !== undefined) course.duration = safeText(data.duration, 40) || 'Self-paced';
+      if (data.outcomes !== undefined) {
+        if (!Array.isArray(data.outcomes) || data.outcomes.length > 10) return fail(res, 400, 'Outcomes must be a list of no more than ten items.');
+        course.outcomes = data.outcomes.map(o => safeText(o, 160)).filter(Boolean);
+      }
+      if (data.published !== undefined) {
+        if (typeof data.published !== 'boolean') return fail(res, 400, 'Published must be true or false.');
+        if (data.published && !course.lessons.length) return fail(res, 400, 'Add at least one lesson before publishing.');
+        course.published = data.published;
+      }
+      save();
+      return json(res, 200, { course: publicCourse(course, user, db, true) });
+    }
+    const manageLesson = pathname.match(/^\/api\/admin\/lessons\/([a-zA-Z0-9-]+)$/);
+    if (manageLesson && (method === 'PATCH' || method === 'DELETE')) {
+      if (!instructor(res, user)) return;
+      const course = db.courses.find(c => c.lessons.some(l => l.id === manageLesson[1]));
+      if (!course) return fail(res, 404, 'Lesson not found.');
+      const lesson = course.lessons.find(l => l.id === manageLesson[1]);
+      if (method === 'DELETE') {
+        course.lessons = course.lessons.filter(l => l.id !== lesson.id);
+        db.completions = db.completions.filter(c => c.lessonId !== lesson.id);
+        db.quizAttempts = db.quizAttempts.filter(a => a.lessonId !== lesson.id);
+        if (!course.lessons.length) course.published = false;
+        save();
+        return json(res, 200, { ok: true });
+      }
+      const data = await body(req);
+      if (data.title !== undefined) {
+        const title = safeText(data.title, 100);
+        if (title.length < 3) return fail(res, 400, 'Lesson title must contain at least three characters.');
+        lesson.title = title;
+      }
+      if (data.lead !== undefined) lesson.lead = safeText(data.lead, 250);
+      if (data.minutes !== undefined) {
+        const n = Number(data.minutes);
+        if (!Number.isInteger(n) || n < 1 || n > 180) return fail(res, 400, 'Reading time must be between 1 and 180 minutes.');
+        lesson.minutes = n;
+      }
+      if (data.content !== undefined) {
+        const content = safeText(data.content, 8000);
+        if (content.length < 30) return fail(res, 400, 'Lesson content must contain at least 30 characters.');
+        lesson.sections = [{ heading: lesson.title, body: content, bullets: [] }];
+      }
+      if (data.quiz !== undefined) {
+        if (data.quiz === null) lesson.quiz = null;
+        else {
+          const quiz = validatedQuiz(data.quiz);
+          if (!quiz) return fail(res, 400, 'Quiz must include a question, answer options and correct index.');
+          lesson.quiz = quiz;
+          db.quizAttempts = db.quizAttempts.filter(a => a.lessonId !== lesson.id);
+        }
+      }
+      save();
+      return json(res, 200, { course: publicCourse(course, user, db, true) });
     }
     return fail(res, 404, 'API route not found.');
   }
@@ -223,8 +339,9 @@ function createApp(opts = {}) {
     const pathname = new URL(req.url || '/', 'http://localhost').pathname;
     try {
       if (pathname.startsWith('/api/')) {
-        if (!['GET', 'POST'].includes(req.method)) return fail(res, 405, 'Method not allowed.');
-        if (req.method === 'POST') {
+        if (!['GET', 'POST', 'PATCH', 'DELETE'].includes(req.method)) return fail(res, 405, 'Method not allowed.');
+        if (['POST', 'PATCH', 'DELETE'].includes(req.method)) {
+          if (req.headers['sec-fetch-site'] === 'cross-site') return fail(res, 403, 'Cross-origin request rejected.');
           const origin = req.headers.origin;
           if (origin) {
             let valid = false;
@@ -252,7 +369,9 @@ function createApp(opts = {}) {
       res.end();
     }
   }
-  return http.createServer(handle);
+  const server = http.createServer(handle);
+  server.on('close', () => store.close());
+  return server;
 }
 
 if (require.main === module) {
