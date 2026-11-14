@@ -1,21 +1,24 @@
 # UNLOS — Online Learning Platform
 
-UNLOS is a complete, lightweight course website developed for an academic demonstration. It includes a responsive student interface, real HTTP APIs and local persistent storage. There is **no build step, database server, or third-party package** to install.
+UNLOS is a working, single-server learning website with student accounts, course lessons, quizzes, saved progress and an instructor studio. It uses a Node.js HTTP server and an embedded SQLite database. There are no runtime npm dependencies or build steps.
 
-## Features
+## Functionality
 
-- Homepage, course catalog, category filters and search
-- Course overviews, reading lessons and knowledge-check quizzes
-- Registration, login, logout and server-side sessions
-- Student enrollment, lesson completion, quiz attempt history and dashboard
-- Instructor-only course and lesson creation
-- Four preloaded courses with 14 lessons and answer-checked quizzes
-- Responsive desktop/mobile layout, keyboard focus states and helpful error messages
-- Node.js HTTP server with built-in storage, hashed passwords and strict session cookies
+| Students | Instructors |
+| --- | --- |
+| Register and log in | Create courses as unpublished drafts |
+| Browse and search the catalog | Publish or unpublish courses |
+| Enroll in courses | Edit and delete courses |
+| Read lessons and take graded quizzes | Add, edit and delete lessons |
+| Resume progress after restart | Author and replace question-based quizzes |
+| View learning dashboard | View student, course and enrollment counts |
+| Update profile and change password | Control public course visibility |
 
-## Quick start
+The starter catalog contains **4 courses and 14 lessons** with short quizzes. Progress, accounts, enrollment and quiz attempts are persisted in a SQLite database.
 
-**Requirement:** Node.js 20 or newer.
+## Start locally
+
+You need **Node.js 22.13+**; Node.js 24 is recommended.
 
 ```bash
 git clone https://github.com/Saitanveesh/unlos.git
@@ -23,79 +26,55 @@ cd unlos
 npm start
 ```
 
-Open **http://localhost:3000**. Create a student account with any valid email and a password of at least eight characters; registration is local to this application. The `.storage/unlos.json` database file is created on first launch and will retain users, courses, enrollments and quiz results on restart. It is excluded from Git.
+Open **http://localhost:3000**. The database is created at `.storage/unlos.sqlite` on first startup.
 
-To change the port on Linux/macOS:
+To create the instructor login, copy `.env.example` to `.env`, change **both** `ADMIN_EMAIL` and `ADMIN_PASSWORD`, and launch with:
 
 ```bash
-PORT=4000 npm start
+node --env-file=.env server.js
 ```
 
-On Windows PowerShell:
+The instructor user is created only if its email does not already exist. An existing user's role is **not** elevated by environment variables. Do not commit `.env`.
 
-```powershell
-$env:PORT=4000
-npm start
-```
-
-For automated tests:
+Run automated checks with:
 
 ```bash
 npm test
 ```
 
-## Instructor account
+## Docker demo
 
-An instructor is optional. Set both `ADMIN_EMAIL` and `ADMIN_PASSWORD` in your operating system's environment before starting the server. The password must contain at least 12 characters. The account is created on first launch if the email doesn't already exist.
+For a reproducible deployment, install Docker and Docker Compose, create `.env` with the instructor credentials, then:
 
-Example (PowerShell):
-
-```powershell
-$env:ADMIN_EMAIL="instructor@example.com"
-$env:ADMIN_PASSWORD="choose-your-own-long-password"
-npm start
+```bash
+docker compose up -d --build
+docker compose ps
 ```
 
-Sign in to see **Course management**. Create courses and add text-based lessons. Only instructor accounts can access the content authoring endpoints. Do not commit private credentials to the public repository.
+The app listens on **http://localhost:3000**. Compose binds to loopback intentionally. Student data is stored on the persistent `unlos-data` Docker volume, not in the container filesystem.
 
-## Project layout
+**Important:** The default `NODE_ENV=development` is for local HTTP demos. For a public deployment, put the app behind an HTTPS reverse proxy, set `NODE_ENV=production`, configure backups and monitoring, and use a server with persistent volume storage. A production session cookie is Secure, so sign-in must happen through **HTTPS**.
 
-```text
-unlos/
-├── server.js          # Routes, authentication, persistence and static hosting
-├── lib/courses.js     # Initial course catalog and lessons
-├── public/
-│   ├── index.html     # App shell
-│   ├── app.js         # UI, navigation, forms and interactions
-│   ├── styles.css     # Responsive design system
-│   └── favicon.svg
-├── tests/smoke.test.js
-├── .env.example
-└── package.json
-```
+## Deployment and data
 
-## API overview
+- `PORT`: HTTP port (default 3000).
+- `DB_FILE`: writable SQLite file path (default `.storage/unlos.sqlite`).
+- `DATA_FILE`: optional old JSON file path, used **only** to import data when SQLite is empty.
+- `ADMIN_EMAIL` and `ADMIN_PASSWORD`: initial instructor account; password must be 12+ characters.
+- `NODE_ENV=production`: Secure session cookies and HSTS. Requires HTTPS.
 
-| Endpoint | Method | Purpose |
-|---|---|---|
-| `/api/health` | GET | Server status |
-| `/api/me` | GET | Current user |
-| `/api/auth/register` | POST | Create a student account |
-| `/api/auth/login` | POST | Login |
-| `/api/auth/logout` | POST | End session |
-| `/api/courses` | GET | Public course catalog |
-| `/api/courses/:slug` | GET | Course details and lesson content |
-| `/api/courses/:slug/enroll` | POST | Enroll signed-in user |
-| `/api/dashboard` | GET | Student progress |
-| `/api/lessons/:id/complete` | POST | Save lesson completion |
-| `/api/lessons/:id/quiz` | POST | Submit an answer and receive a grade |
-| `/api/admin/courses` | POST | Instructor creates course |
-| `/api/admin/courses/:slug/lessons` | POST | Instructor adds lesson |
+Previous `.storage/unlos.json` data is imported automatically on first startup if the new SQLite database is empty. Keep the original JSON backup until the data has been verified. Never share a live database or `.env` in GitHub.
 
-All state-changing actions are done through the backend; the browser does not fake quiz results or progress. Quiz answer keys are not sent in course GET responses.
+For release steps, limitations and the handover checklist, see [DEPLOYMENT.md](DEPLOYMENT.md).
 
-## Deployment notes
+## Important API endpoints
 
-This implementation is a **single-server teaching/demo application**. Run behind HTTPS for public deployments with `NODE_ENV=production` (which marks cookies `Secure`). Mount a persistent storage volume and set `DATA_FILE` to a writable location; ephemeral hosting storage will erase accounts and progress. The JSON file store is appropriate for one server process and light classroom use; use PostgreSQL or another transactional database before running multiple instances or serving substantial traffic. Email verification, password reset, uploaded videos and third-party payments are intentionally not included.
+`GET /api/health`, `GET /api/courses`, `GET /api/courses/:slug`, `POST /api/auth/register`, `POST /api/auth/login`, `POST /api/auth/logout`, `GET /api/me`, `GET /api/dashboard`, `POST /api/courses/:slug/enroll`, `POST /api/lessons/:id/complete`, `POST /api/lessons/:id/quiz`, `PATCH /api/account/profile`, `POST /api/account/password`, `GET /api/admin/overview`, `POST /api/admin/courses`, `PATCH/DELETE /api/admin/courses/:slug`, `POST /api/admin/courses/:slug/lessons`, and `PATCH/DELETE /api/admin/lessons/:id`.
 
-The sample curriculum is introductory material created for this demonstration. It is not accredited certification content.
+API authorization is checked on the server. Answers are graded server-side and quiz answer keys are excluded from course responses.
+
+## Scope and limitations
+
+UNLOS is suitable for a classroom demonstration, a small private pilot, or a single-server client proof of concept. It is **not yet a fully operated commercial learning service**: public hosting, verified email, password recovery, accessible video streaming, payments, backups, retention policies, legal documents, operational monitoring, load testing and independent security testing remain outside this release. SQLite stores individual entity records transactionally but the server rewrites the current document collections during updates; use a normalized database and concurrency design for significant production traffic.
+
+The code is currently held in the developer's repository; transfer of repository ownership and live infrastructure will be a separate handover step.

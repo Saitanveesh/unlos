@@ -1,0 +1,17 @@
+services:
+  unlos:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      PORT: "3000"
+      DB_FILE: /data/unlos.sqlite
+      NODE_ENV: ${NODE_ENV:-development}
+      ADMIN_EMAIL: ${ADMIN_EMAIL:?Set ADMIN_EMAIL in .env}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?Set ADMIN_PASSWORD in .env}
+    volumes:
+      - unlos-data:/data
+
+volumes:
+  unlos-data:
