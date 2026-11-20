@@ -446,9 +446,19 @@ function createApp(opts = {}) {
     res.setHeader('Content-Security-Policy', "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'");
 
     // Support Vercel rewrite paths or standard URLs
+    const urlObj = new URL(req.url || '/', 'http://localhost');
+    const unlosParam = urlObj.searchParams.get('unlos_path');
     const matchedPath = req.headers['x-matched-path'];
-    const rawUrl = (matchedPath && matchedPath.startsWith('/api/')) ? matchedPath : (req.url || '/');
-    const pathname = new URL(rawUrl, 'http://localhost').pathname;
+    const forwardedUrl = req.headers['x-forwarded-url'];
+
+    let pathname = urlObj.pathname;
+    if (unlosParam) {
+      pathname = '/api/' + unlosParam;
+    } else if (forwardedUrl && forwardedUrl.startsWith('/api/')) {
+      pathname = new URL(forwardedUrl, 'http://localhost').pathname;
+    } else if (matchedPath && matchedPath.startsWith('/api/')) {
+      pathname = new URL(matchedPath, 'http://localhost').pathname;
+    }
 
     try {
       if (pathname.startsWith('/api/') || pathname === '/api') {
