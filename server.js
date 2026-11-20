@@ -481,7 +481,8 @@ function createApp(opts = {}) {
       if (req.method === 'HEAD') return res.end();
       fs.createReadStream(file).pipe(res);
     } catch (e) {
-      if (!res.headersSent) return fail(res, e.status || 500, e.status ? e.message : 'Unexpected server error.');
+      console.error('[UNLOS Request Error]', e);
+      if (!res.headersSent) return fail(res, e.status || 500, e.message || 'Unexpected server error.');
       res.end();
     }
   }
