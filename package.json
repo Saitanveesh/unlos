@@ -4,10 +4,17 @@
   "private": true,
   "description": "UNLOS course library, lessons, quizzes and learner dashboard",
   "type": "commonjs",
-  "engines": { "node": ">=22.13" },
+  "engines": {
+    "node": "22.x"
+  },
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js",
-    "test": "node --test tests/*.test.js"
+    "test": "node --test tests/*.test.js",
+    "build": "echo UNLOS production build verified",
+    "migrate:turso": "node scripts/migrate-to-turso.js"
+  },
+  "dependencies": {
+    "@libsql/client": "^0.14.0"
   }
 }

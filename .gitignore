@@ -1,10 +1,16 @@
 node_modules/
 .env
+.env.*
+!.env.example
 .storage/
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal
+# Logs, tests and OS files
 *.log
 .DS_Store
 coverage/
 backups/
+__pycache__/
+*.pyc
+.vercel/

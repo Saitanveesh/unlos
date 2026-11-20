@@ -9,7 +9,14 @@ const { courses: seedCourses } = require('./lib/courses');
 const { createStore } = require('./lib/store');
 
 const PUBLIC_DIR = path.join(__dirname, 'public');
-const MIME = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'application/javascript; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon' };
+const MIME = {
+  '.html': 'text/html; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.js': 'application/javascript; charset=utf-8',
+  '.svg': 'image/svg+xml',
+  '.png': 'image/png',
+  '.ico': 'image/x-icon'
+};
 const ttl = 30 * 24 * 60 * 60 * 1000;
 const id = () => crypto.randomUUID();
 const sha = value => crypto.createHash('sha256').update(value).digest('hex');
@@ -50,7 +57,6 @@ function publicCourse(course, user, db, detailed = false) {
   return result;
 }
 
-
 function validatedQuiz(raw) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
   const question = safeText(raw.question, 300);
@@ -64,14 +70,49 @@ function validatedQuiz(raw) {
 
 function createApp(opts = {}) {
   const store = createStore({ ...opts, seedCourses });
-  let db = store.data;
-  function save() { store.save(db); }
+  let db = store.data || { users: [], sessions: [], enrollments: [], completions: [], quizAttempts: [], courses: structuredClone(seedCourses) };
+
+  async function save() {
+    return await store.save(db);
+  }
+
   const adminEmail = cleanEmail(opts.adminEmail || process.env.ADMIN_EMAIL || '');
   const adminPassword = opts.adminPassword || process.env.ADMIN_PASSWORD || '';
-  if (adminEmail && adminPassword.length >= 12 && !db.users.some(u => u.email === adminEmail)) {
-    db.users.push({ id: id(), name: 'Instructor', email: adminEmail, password: hashPassword(adminPassword), role: 'admin', joinedAt: new Date().toISOString() });
+
+  // Synchronous seed for SQLite store
+  if (store.type === 'sqlite') {
+    if (adminEmail && adminPassword.length >= 12 && !db.users.some(u => u.email === adminEmail)) {
+      db.users.push({ id: id(), name: 'Instructor', email: adminEmail, password: hashPassword(adminPassword), role: 'admin', joinedAt: new Date().toISOString() });
+      save();
+    }
   }
-  save();
+
+  let readyPromise = null;
+  async function ensureReady() {
+    if (store.init) {
+      if (!readyPromise) {
+        readyPromise = (async () => {
+          try {
+            await store.init();
+            db = store.data;
+            if (adminEmail && adminPassword.length >= 12 && !db.users.some(u => u.email === adminEmail)) {
+              db.users.push({ id: id(), name: 'Instructor', email: adminEmail, password: hashPassword(adminPassword), role: 'admin', joinedAt: new Date().toISOString() });
+              await save();
+            }
+          } catch (err) {
+            readyPromise = null;
+            throw err;
+          }
+        })();
+      }
+      await readyPromise;
+    }
+    if (store.sync && readyPromise) {
+      await store.sync();
+      db = store.data;
+    }
+  }
+
   const attempts = new Map();
   const json = (res, status, value) => {
     res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
@@ -91,14 +132,36 @@ function createApp(opts = {}) {
   const profile = u => u ? { id: u.id, name: u.name, email: u.email, role: u.role, joinedAt: u.joinedAt } : null;
   const authenticated = (res, user) => !!user || (fail(res, 401, 'Please sign in to continue.'), false);
   const instructor = (res, user) => authenticated(res, user) && (user.role === 'admin' || (fail(res, 403, 'Instructor access required.'), false));
-  const makeSession = (res, user) => {
+
+  const makeSession = async (res, user, req) => {
     const token = crypto.randomBytes(32).toString('hex');
     db.sessions.push({ userId: user.id, tokenHash: sha(token), expiresAt: Date.now() + ttl });
-    save();
-    const secure = process.env.NODE_ENV === 'production' ? '; Secure' : '';
+    await save();
+    const isHttps = process.env.NODE_ENV === 'production' || (req && req.headers['x-forwarded-proto'] === 'https');
+    const secure = isHttps ? '; Secure' : '';
     res.setHeader('Set-Cookie', `unlos_session=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${ttl / 1000}${secure}`);
   };
+
+  /**
+   * Universal body parser:
+   * Handles pre-parsed req.body from Vercel serverless environment,
+   * buffers/strings, and streaming req for standalone Node.js.
+   */
   async function body(req) {
+    if (req.body !== undefined && req.body !== null) {
+      if (typeof req.body === 'object' && !Buffer.isBuffer(req.body)) return req.body;
+      if (typeof req.body === 'string') {
+        if (req.body.length > 64 * 1024) { const err = new Error('Request is too large.'); err.status = 413; throw err; }
+        try { return JSON.parse(req.body || '{}'); }
+        catch { const err = new Error('Invalid JSON body.'); err.status = 400; throw err; }
+      }
+      if (Buffer.isBuffer(req.body)) {
+        if (req.body.length > 64 * 1024) { const err = new Error('Request is too large.'); err.status = 413; throw err; }
+        try { return JSON.parse(req.body.toString('utf8') || '{}'); }
+        catch { const err = new Error('Invalid JSON body.'); err.status = 400; throw err; }
+      }
+    }
+
     const pieces = []; let count = 0;
     for await (const part of req) {
       count += part.length;
@@ -108,58 +171,76 @@ function createApp(opts = {}) {
     try { return JSON.parse(Buffer.concat(pieces).toString('utf8') || '{}'); }
     catch { const err = new Error('Invalid JSON body.'); err.status = 400; throw err; }
   }
-  const answerJson = (req, res, status, data) => json(res, status, data);
 
   async function api(req, res, pathname) {
     const user = currentUser(req), method = req.method;
-    if (pathname === '/api/health') return method === 'GET'
-      ? json(res, 200, { ok: true, service: 'UNLOS', storage: 'sqlite' })
+    if (pathname === '/api/health' || pathname === '/api' || pathname === '/api/') return method === 'GET'
+      ? json(res, 200, { ok: true, service: 'UNLOS', version: '2.0.0', storage: store.type || 'sqlite' })
       : fail(res, 405, 'Method not allowed.');
+
     if (pathname === '/api/me' && method === 'GET') return json(res, 200, { user: profile(user) });
+
     if (pathname === '/api/auth/register' && method === 'POST') {
       const data = await body(req);
       const name = safeText(data.name, 80), email = cleanEmail(data.email), password = data.password;
-      if (name.length < 2 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || typeof password !== 'string' || password.length < 8 || password.length > 200) return fail(res, 400, 'Enter a name, valid email and password of at least 8 characters.');
+      if (name.length < 2 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || typeof password !== 'string' || password.length < 8 || password.length > 200) {
+        return fail(res, 400, 'Enter a name, valid email and password of at least 8 characters.');
+      }
       if (db.users.some(u => u.email === email)) return fail(res, 409, 'An account already exists with this email.');
       const fresh = { id: id(), name, email, password: hashPassword(password), role: 'student', joinedAt: new Date().toISOString() };
-      db.users.push(fresh); makeSession(res, fresh);
+      db.users.push(fresh);
+      await makeSession(res, fresh, req);
       return json(res, 201, { user: profile(fresh) });
     }
+
     if (pathname === '/api/auth/login' && method === 'POST') {
-      const ip = req.socket.remoteAddress || 'unknown', now = Date.now();
+      const forwardedFor = req.headers['x-forwarded-for'];
+      const ip = (typeof forwardedFor === 'string' ? forwardedFor.split(',')[0].trim() : '') || req.socket?.remoteAddress || 'unknown';
+      const now = Date.now();
       const state = attempts.get(ip) || { count: 0, start: now };
       if (now - state.start > 15 * 60 * 1000) { state.count = 0; state.start = now; }
       if (state.count >= 15) return fail(res, 429, 'Too many attempts. Please try again later.');
+
       const data = await body(req); const email = cleanEmail(data.email);
       const match = db.users.find(u => u.email === email);
       if (!match || typeof data.password !== 'string' || !verifyPassword(data.password, match.password)) {
         state.count++; attempts.set(ip, state);
         return fail(res, 401, 'Invalid email or password.');
       }
-      attempts.delete(ip); makeSession(res, match);
+      attempts.delete(ip);
+      await makeSession(res, match, req);
       return json(res, 200, { user: profile(match) });
     }
+
     if (pathname === '/api/auth/logout' && method === 'POST') {
       db.sessions = db.sessions.filter(s => s.tokenHash !== sha(cookie(req)));
-      save(); res.setHeader('Set-Cookie', 'unlos_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0');
+      await save();
+      res.setHeader('Set-Cookie', 'unlos_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0');
       return json(res, 200, { ok: true });
     }
-    if (pathname === '/api/courses' && method === 'GET') return json(res, 200, { courses: db.courses.filter(c => c.published !== false || user?.role === 'admin').map(c => publicCourse(c, user, db)) });
+
+    if (pathname === '/api/courses' && method === 'GET') {
+      return json(res, 200, { courses: db.courses.filter(c => c.published !== false || user?.role === 'admin').map(c => publicCourse(c, user, db)) });
+    }
+
     const single = pathname.match(/^\/api\/courses\/([a-z0-9-]+)$/);
     if (single && method === 'GET') {
       const course = db.courses.find(c => c.slug === single[1]);
       return course && (course.published !== false || user?.role === 'admin') ? json(res, 200, { course: publicCourse(course, user, db, true) }) : fail(res, 404, 'Course not found.');
     }
+
     const enroll = pathname.match(/^\/api\/courses\/([a-z0-9-]+)\/enroll$/);
     if (enroll && method === 'POST') {
       if (!authenticated(res, user)) return;
       const course = db.courses.find(c => c.slug === enroll[1]);
       if (!course || course.published === false) return fail(res, 404, 'Course not found.');
       if (!db.enrollments.some(e => e.userId === user.id && e.courseId === course.id)) {
-        db.enrollments.push({ userId: user.id, courseId: course.id, joinedAt: new Date().toISOString() }); save();
+        db.enrollments.push({ userId: user.id, courseId: course.id, joinedAt: new Date().toISOString() });
+        await save();
       }
       return json(res, 200, { course: publicCourse(course, user, db, true) });
     }
+
     if (pathname === '/api/dashboard' && method === 'GET') {
       if (!authenticated(res, user)) return;
       const courses = db.courses.filter(c => c.published !== false && db.enrollments.some(e => e.userId === user.id && e.courseId === c.id)).map(c => publicCourse(c, user, db));
@@ -167,6 +248,7 @@ function createApp(opts = {}) {
       const passedQuizzes = new Set(db.quizAttempts.filter(q => q.userId === user.id && q.correct).map(q => q.lessonId)).size;
       return json(res, 200, { courses, stats: { enrolledCourses: courses.length, completedLessons, passedQuizzes, finishedCourses: courses.filter(c => c.lessonCount && c.progress === 100).length }, user: profile(user) });
     }
+
     const complete = pathname.match(/^\/api\/lessons\/([a-zA-Z0-9-]+)\/complete$/);
     if (complete && method === 'POST') {
       if (!authenticated(res, user)) return;
@@ -174,10 +256,12 @@ function createApp(opts = {}) {
       if (!course) return fail(res, 404, 'Lesson not found.');
       if (!db.enrollments.some(e => e.userId === user.id && e.courseId === course.id)) return fail(res, 403, 'Enroll in the course first.');
       if (!db.completions.some(c => c.userId === user.id && c.lessonId === complete[1])) {
-        db.completions.push({ userId: user.id, lessonId: complete[1], completedAt: new Date().toISOString() }); save();
+        db.completions.push({ userId: user.id, lessonId: complete[1], completedAt: new Date().toISOString() });
+        await save();
       }
       return json(res, 200, { course: publicCourse(course, user, db, true) });
     }
+
     const quizRoute = pathname.match(/^\/api\/lessons\/([a-zA-Z0-9-]+)\/quiz$/);
     if (quizRoute && method === 'POST') {
       if (!authenticated(res, user)) return;
@@ -189,9 +273,11 @@ function createApp(opts = {}) {
       const data = await body(req);
       if (!Number.isInteger(data.answer) || data.answer < 0 || data.answer >= lesson.quiz.options.length) return fail(res, 400, 'Select a valid answer.');
       const correct = data.answer === lesson.quiz.answer;
-      db.quizAttempts.push({ userId: user.id, lessonId: lesson.id, correct, attemptedAt: new Date().toISOString() }); save();
+      db.quizAttempts.push({ userId: user.id, lessonId: lesson.id, correct, attemptedAt: new Date().toISOString() });
+      await save();
       return json(res, 200, { correct, answer: lesson.quiz.answer, explanation: lesson.quiz.explanation });
     }
+
     if (pathname === '/api/admin/courses' && method === 'POST') {
       if (!instructor(res, user)) return;
       const data = await body(req), title = safeText(data.title, 100), description = safeText(data.description, 400);
@@ -201,9 +287,11 @@ function createApp(opts = {}) {
       let slug = baseSlug, n = 2;
       while (db.courses.some(c => c.slug === slug)) slug = `${baseSlug}-${n++}`;
       const course = { id: id(), slug, title, description, category, level, published: false, duration: 'Self-paced', icon: 'book', accent: ['violet', 'blue', 'peach', 'mint'][db.courses.length % 4], outcomes: [], lessons: [] };
-      db.courses.push(course); save();
+      db.courses.push(course);
+      await save();
       return json(res, 201, { course: publicCourse(course, user, db, true) });
     }
+
     const addLesson = pathname.match(/^\/api\/admin\/courses\/([a-z0-9-]+)\/lessons$/);
     if (addLesson && method === 'POST') {
       if (!instructor(res, user)) return;
@@ -213,7 +301,8 @@ function createApp(opts = {}) {
       if (title.length < 3 || content.length < 30) return fail(res, 400, 'The lesson needs a title and at least 30 characters of content.');
       const entry = { id: id(), title, minutes: Math.min(180, Math.max(1, Number(data.minutes) || 15)), lead: lead || 'Read the lesson and mark it complete.', sections: [{ heading: title, body: content, bullets: [] }], quiz: data.quiz ? validatedQuiz(data.quiz) : null };
       if (data.quiz && !entry.quiz) return fail(res, 400, 'Provide a question, 2 to 6 options and a valid answer index.');
-      course.lessons.push(entry); save();
+      course.lessons.push(entry);
+      await save();
       return json(res, 201, { course: publicCourse(course, user, db, true) });
     }
 
@@ -222,9 +311,11 @@ function createApp(opts = {}) {
       const data = await body(req);
       const name = safeText(data.name, 80);
       if (name.length < 2) return fail(res, 400, 'Name must contain at least two characters.');
-      user.name = name; save();
+      user.name = name;
+      await save();
       return json(res, 200, { user: profile(user) });
     }
+
     if (pathname === '/api/account/password' && method === 'POST') {
       if (!authenticated(res, user)) return;
       const data = await body(req);
@@ -233,9 +324,10 @@ function createApp(opts = {}) {
       if (data.currentPassword === data.newPassword) return fail(res, 400, 'Choose a different password.');
       user.password = hashPassword(data.newPassword);
       db.sessions = db.sessions.filter(session => session.userId !== user.id || session.tokenHash === sha(cookie(req)));
-      save();
+      await save();
       return json(res, 200, { ok: true });
     }
+
     if (pathname === '/api/admin/overview' && method === 'GET') {
       if (!instructor(res, user)) return;
       return json(res, 200, { stats: {
@@ -247,6 +339,7 @@ function createApp(opts = {}) {
         quizAttempts: db.quizAttempts.length
       } });
     }
+
     const manageCourse = pathname.match(/^\/api\/admin\/courses\/([a-z0-9-]+)$/);
     if (manageCourse && (method === 'PATCH' || method === 'DELETE')) {
       if (!instructor(res, user)) return;
@@ -258,7 +351,7 @@ function createApp(opts = {}) {
         db.enrollments = db.enrollments.filter(e => e.courseId !== course.id);
         db.completions = db.completions.filter(c => !lessonIds.has(c.lessonId));
         db.quizAttempts = db.quizAttempts.filter(a => !lessonIds.has(a.lessonId));
-        save();
+        await save();
         return json(res, 200, { ok: true });
       }
       const data = await body(req);
@@ -284,9 +377,10 @@ function createApp(opts = {}) {
         if (data.published && !course.lessons.length) return fail(res, 400, 'Add at least one lesson before publishing.');
         course.published = data.published;
       }
-      save();
+      await save();
       return json(res, 200, { course: publicCourse(course, user, db, true) });
     }
+
     const manageLesson = pathname.match(/^\/api\/admin\/lessons\/([a-zA-Z0-9-]+)$/);
     if (manageLesson && (method === 'PATCH' || method === 'DELETE')) {
       if (!instructor(res, user)) return;
@@ -298,7 +392,7 @@ function createApp(opts = {}) {
         db.completions = db.completions.filter(c => c.lessonId !== lesson.id);
         db.quizAttempts = db.quizAttempts.filter(a => a.lessonId !== lesson.id);
         if (!course.lessons.length) course.published = false;
-        save();
+        await save();
         return json(res, 200, { ok: true });
       }
       const data = await body(req);
@@ -327,9 +421,10 @@ function createApp(opts = {}) {
           db.quizAttempts = db.quizAttempts.filter(a => a.lessonId !== lesson.id);
         }
       }
-      save();
+      await save();
       return json(res, 200, { course: publicCourse(course, user, db, true) });
     }
+
     return fail(res, 404, 'API route not found.');
   }
 
@@ -338,24 +433,41 @@ function createApp(opts = {}) {
     res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
     res.setHeader('X-Frame-Options', 'DENY');
     res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
-    if (process.env.NODE_ENV === 'production') res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+    if (process.env.NODE_ENV === 'production' || req.headers['x-forwarded-proto'] === 'https') {
+      res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+    }
     res.setHeader('Content-Security-Policy', "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'");
-    const pathname = new URL(req.url || '/', 'http://localhost').pathname;
+
+    // Ensure database is connected and initialized (e.g. for Turso or async store)
+    await ensureReady();
+
+    // Support Vercel rewrite paths or standard URLs
+    const matchedPath = req.headers['x-matched-path'];
+    const rawUrl = (matchedPath && matchedPath.startsWith('/api/')) ? matchedPath : (req.url || '/');
+    const pathname = new URL(rawUrl, 'http://localhost').pathname;
+
     try {
-      if (pathname.startsWith('/api/')) {
+      if (pathname.startsWith('/api/') || pathname === '/api') {
         if (!['GET', 'POST', 'PATCH', 'DELETE'].includes(req.method)) return fail(res, 405, 'Method not allowed.');
         if (['POST', 'PATCH', 'DELETE'].includes(req.method)) {
           if (req.headers['sec-fetch-site'] === 'cross-site') return fail(res, 403, 'Cross-origin request rejected.');
           const origin = req.headers.origin;
           if (origin) {
             let valid = false;
-            try { valid = new URL(origin).host === req.headers.host; } catch { /* invalid origin */ }
+            try {
+              const originHost = new URL(origin).host;
+              const reqHost = req.headers.host;
+              const forwardedHost = req.headers['x-forwarded-host'];
+              const firstForwardedHost = typeof forwardedHost === 'string' ? forwardedHost.split(',')[0].trim() : null;
+              valid = originHost === reqHost || (firstForwardedHost && originHost === firstForwardedHost);
+            } catch { /* invalid origin */ }
             if (!valid) return fail(res, 403, 'Cross-origin request rejected.');
           }
           if (req.headers['content-type'] && !req.headers['content-type'].startsWith('application/json')) return fail(res, 415, 'Use application/json.');
         }
         return await api(req, res, pathname);
       }
+
       if (!['GET', 'HEAD'].includes(req.method)) return fail(res, 405, 'Method not allowed.');
       const target = pathname === '/' ? 'index.html' : pathname.slice(1);
       const file = path.resolve(PUBLIC_DIR, target);
@@ -373,13 +485,21 @@ function createApp(opts = {}) {
       res.end();
     }
   }
+
   const server = http.createServer(handle);
+  server.handle = handle;
   server.on('close', () => store.close());
   return server;
+}
+
+function createHandler(opts = {}) {
+  const server = createApp(opts);
+  return server.handle;
 }
 
 if (require.main === module) {
   const port = Number(process.env.PORT || 3000);
   createApp().listen(port, '0.0.0.0', () => console.log(`UNLOS running at http://localhost:${port}`));
 }
-module.exports = { createApp };
+
+module.exports = { createApp, createHandler };
