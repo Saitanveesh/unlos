@@ -83,7 +83,9 @@ async function migrate() {
 
   // 1. Ensure table and indexes exist on Turso
   console.log('🔨 Ensuring schema exists on Turso...');
-  await client.execute(SCHEMA_SQL);
+  for (const stmt of SCHEMA_SQL.split(';').map(s => s.trim()).filter(Boolean)) {
+    await client.execute(stmt);
+  }
 
   // 2. Batch insert records
   console.log('🚀 Migrating records to Turso...');

@@ -14,8 +14,25 @@ const { createHandler } = require('../server');
 let handler = null;
 
 module.exports = async function (req, res) {
-  if (!handler) {
-    handler = createHandler();
+  try {
+    if (!handler) {
+      handler = createHandler();
+    }
+    return await handler(req, res);
+  } catch (err) {
+    console.error('[UNLOS Vercel Serverless Error]', err);
+    if (!res.headersSent) {
+      res.statusCode = 500;
+      res.setHeader('Content-Type', 'application/json; charset=utf-8');
+      res.end(JSON.stringify({
+        error: 'Serverless Function Invocation Error',
+        message: err.message,
+        name: err.name,
+        hasTursoUrl: Boolean(process.env.TURSO_DATABASE_URL),
+        hasTursoToken: Boolean(process.env.TURSO_AUTH_TOKEN),
+        nodeVersion: process.version,
+        stack: err.stack
+      }, null, 2));
+    }
   }
-  return handler(req, res);
 };

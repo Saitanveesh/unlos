@@ -438,15 +438,15 @@ function createApp(opts = {}) {
     }
     res.setHeader('Content-Security-Policy', "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'");
 
-    // Ensure database is connected and initialized (e.g. for Turso or async store)
-    await ensureReady();
-
     // Support Vercel rewrite paths or standard URLs
     const matchedPath = req.headers['x-matched-path'];
     const rawUrl = (matchedPath && matchedPath.startsWith('/api/')) ? matchedPath : (req.url || '/');
     const pathname = new URL(rawUrl, 'http://localhost').pathname;
 
     try {
+      // Ensure database is connected and initialized (e.g. for Turso or async store)
+      await ensureReady();
+
       if (pathname.startsWith('/api/') || pathname === '/api') {
         if (!['GET', 'POST', 'PATCH', 'DELETE'].includes(req.method)) return fail(res, 405, 'Method not allowed.');
         if (['POST', 'PATCH', 'DELETE'].includes(req.method)) {
