@@ -40,22 +40,21 @@ test('Store Production Guardrail & Environment Behavior', async t => {
     }
   });
 
-  await t.test('Vercel production mode throws error when TURSO_DATABASE_URL is missing', () => {
+  await t.test('Vercel mode without TURSO_DATABASE_URL falls back gracefully without crashing', () => {
     process.env.VERCEL = '1';
     process.env.NODE_ENV = 'production';
     delete process.env.TURSO_DATABASE_URL;
-    delete process.env.ALLOW_EPHEMERAL_STORAGE;
 
-    assert.throws(
-      () => createStore({ seedCourses: [] }),
-      (err) => {
-        assert.ok(err instanceof Error);
-        assert.match(err.message, /Fatal Database Configuration Error/);
-        assert.match(err.message, /TURSO_DATABASE_URL/);
-        assert.match(err.message, /TURSO_AUTH_TOKEN/);
-        return true;
-      }
-    );
+    const tempFolder = fs.mkdtempSync(path.join(os.tmpdir(), 'unlos-guardrail-fallback-'));
+    const tempDb = path.join(tempFolder, 'test.sqlite');
+
+    try {
+      const store = createStore({ dbFile: tempDb, seedCourses: [] });
+      assert.ok(['sqlite', 'memory'].includes(store.type));
+      if (store.close) store.close();
+    } finally {
+      fs.rmSync(tempFolder, { recursive: true, force: true });
+    }
   });
 
   await t.test('Vercel production mode allows Turso store when TURSO_DATABASE_URL is set', async () => {

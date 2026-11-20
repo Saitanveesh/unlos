@@ -2,16 +2,8 @@
   "version": 2,
   "rewrites": [
     {
-      "source": "/api",
-      "destination": "/api/index.js"
-    },
-    {
       "source": "/api/(.*)",
-      "destination": "/api/index.js"
-    },
-    {
-      "source": "/((?!api/|app\\.js|styles\\.css|favicon\\.svg|.*\\..*).*)",
-      "destination": "/index.html"
+      "destination": "/api"
     }
   ],
   "headers": [
