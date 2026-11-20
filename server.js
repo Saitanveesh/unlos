@@ -502,4 +502,18 @@ if (require.main === module) {
   createApp().listen(port, '0.0.0.0', () => console.log(`UNLOS running at http://localhost:${port}`));
 }
 
-module.exports = { createApp, createHandler };
+let defaultHandler = null;
+function serverlessHandler(req, res) {
+  if (!defaultHandler) {
+    defaultHandler = createHandler();
+  }
+  return defaultHandler(req, res);
+}
+
+serverlessHandler.createApp = createApp;
+serverlessHandler.createHandler = createHandler;
+
+module.exports = serverlessHandler;
+module.exports.createApp = createApp;
+module.exports.createHandler = createHandler;
+module.exports.default = serverlessHandler;
