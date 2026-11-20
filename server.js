@@ -89,27 +89,34 @@ function createApp(opts = {}) {
 
   let readyPromise = null;
   async function ensureReady() {
-    if (store.init) {
-      if (!readyPromise) {
-        readyPromise = (async () => {
-          try {
-            await store.init();
-            db = store.data;
-            if (adminEmail && adminPassword.length >= 12 && !db.users.some(u => u.email === adminEmail)) {
-              db.users.push({ id: id(), name: 'Instructor', email: adminEmail, password: hashPassword(adminPassword), role: 'admin', joinedAt: new Date().toISOString() });
-              await save();
+    try {
+      if (store.init) {
+        if (!readyPromise) {
+          readyPromise = (async () => {
+            try {
+              await store.init();
+              db = store.data || db;
+              if (adminEmail && adminPassword.length >= 12 && !db.users.some(u => u.email === adminEmail)) {
+                db.users.push({ id: id(), name: 'Instructor', email: adminEmail, password: hashPassword(adminPassword), role: 'admin', joinedAt: new Date().toISOString() });
+                try { await save(); } catch (e) { /* ignore write failure */ }
+              }
+            } catch (err) {
+              console.warn('[UNLOS] Store init warning (using in-memory data):', err.message);
             }
-          } catch (err) {
-            readyPromise = null;
-            throw err;
-          }
-        })();
+          })();
+        }
+        await readyPromise;
       }
-      await readyPromise;
-    }
-    if (store.sync && readyPromise) {
-      await store.sync();
-      db = store.data;
+      if (store.sync) {
+        try {
+          await store.sync();
+          db = store.data || db;
+        } catch (e) {
+          console.warn('[UNLOS] Store sync warning:', e.message);
+        }
+      }
+    } catch (err) {
+      console.warn('[UNLOS] ensureReady error caught:', err.message);
     }
   }
 
